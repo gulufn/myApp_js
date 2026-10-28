@@ -42,35 +42,20 @@ const MIME_TYPES = {
     ".bmp": "image/bmp",
     ".svg": "image/svg+xml",
 };
-//检查该目录下的子文件夹是否存在，返回文件信息
-function safeReaddir(rootDir) {
-    try {
-        const stat = fs.statSync(rootDir);
-        if (!stat.isDirectory()) {
-            return { ok: false, reason: 'not a directory' };
-        }
-        const items = fs.readdirSync(rootDir, { withFileTypes: true });
-        return { ok: true, items };
-    } catch (err) {
-        switch (err.code) {
-            case 'ENOENT': return { ok: false, reason: 'not found' };
-            case 'EACCES':
-            case 'EPERM': return { ok: false, reason: 'permission denied' };
-            case 'ELOOP': return { ok: false, reason: 'symlink loop' };
-            default: return { ok: false, reason: err.message };
-        }
-    }
+function setFileCorsHeaders(res) {
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('Access-Control-Allow-Headers', 'Range, Content-Type');
+    res.setHeader('Access-Control-Expose-Headers', 'Content-Range, Accept-Ranges, Content-Length');
+    
+    
 }
 
-//get请求入口，后端处理get请求,url=http://127.0.0.1:3001/video/tv01.mp4?key=m2fTBT-pWgwyRJqRcGpjSIefYLxU-gLDqOcxo2rKemQ
 app.get("/video/:path", (req, res) => {
     const form = req.query.form ?? null;
     const filename = req.params.path ?? null;
-    const season = req.query.season ?? null;
     const key = req.query.key ?? null;
-    const video = req.query.video ?? null;
-    const img = req.query.img ?? null;
-    console.log(form, filename, season, key, video, img);
+    const file_source = req.query.file_source ?? null;
+    console.log(form, filename, key, file_source);
 
     ///////////////////////////////////////////////////基础信息验证
     //验证key
@@ -92,55 +77,53 @@ app.get("/video/:path", (req, res) => {
         res.status(401).json({ status: false, msg: "key过期" });
         return;
     }
+
+
     ////////////////////////////////////////////////////////////
     //一个判断参数是否为null、空字符串、未定义。的方法
     const notEmpty = (v) => v !== undefined && v !== null && v !== '';
+    const isImage = /^[\w.-]+\.(jpg|png|jpeg|webp|gif|bmp|svg)$/.test(file_source);
+    const isVideo = /^[\w.-]+\.(mp4|m4v|webm|mkv|avi|mov|flv|wmv|ts|mpg|mpeg|3gp|ogv)$/.test(file_source);
     //判断url中最基础了两个参数是否存在
     if (!notEmpty(form) || !notEmpty(filename)) {
         res.status(401).json({ status: false, msg: "form缺失" });
         return;
     }
-
     //////////////////////////////////////////////////////开启3个分支
-    //没有season时，返回该目录中子文件夹中的data.json
-    if (!notEmpty(season)) {
-        const rootDir = path.join(VIDEO_DIR, form, filename);
-        const path_jaon = [];
-        const items = safeReaddir(rootDir);
-        if (items.ok) {
-            for (const item of items.items) {
-                if (item.isDirectory()) {
-                    const dataJsonPath = path.join(rootDir, item.name, 'data.json');
-                    if (fs.existsSync(dataJsonPath)) {
-                        path_jaon.push(dataJsonPath)
-                    }
-                }
-            }
-            const data_json = [];
-            for (const i of path_jaon) {
-                data_json.push(require(i));
-            }
-            res
-                .status(200).json({ status: true, msg: '成功', data: data_json });
-            return;
+    //没有file_source时，返回该目录中子文件夹中的data.json
+    if (!notEmpty(file_source)) {
+        setFileCorsHeaders(res);  //解决跨域问题
+
+        const filePath = path.join(VIDEO_DIR, form, filename, 'data.json');
+        // 安全检查：防止 ../ 路径穿越
+        const resolved = path.resolve(filePath);
+        //判断拿到的文件的路径是否在VIDEO_DIR里，如果不是，就是越权了
+        if (!resolved.startsWith(path.resolve(VIDEO_DIR) + path.sep)) {
+            return res.status(403).json({ status: false, msg: "越权" });
         }
-        res
-            .status(400)
-            .json({ status: false, msg: items.reason });
+        try {
+            const raw = fs.readFileSync(resolved, 'utf8');
+            const data = JSON.parse(raw);
+            res.status(200).json({ status: true, msg: '成功', data: data });
+        } catch (e) {
+            // e.code === 'ENOENT' → 文件不存在
+            // 其他 → 读取失败或 JSON 解析失败
+            if (e.code === 'ENOENT') {
+                res.status(404).json({ status: false, msg: 'data.json 不存在' });
+            } else {
+                res.status(500).json({ status: false, msg: 'data.json 读取或解析失败' });
+            }
+        }
         return;
     }
-
-
-    ////////////////////////////////////////////////////////第二个分支
-    //有season时，并且有video,进入video分支
-    if (notEmpty(video)) {
-        // 文件类型检查：只允许访问指定的文件类型
-        if (!/^[\w.-]+\.(mp4|m4v|webm|mkv|avi|mov|flv|wmv|ts|mpg|mpeg|3gp|ogv)$/.test(video)) {
-            res.status(401).json({ status: false, msg: "文件类类型不符合要求" });
-            return;
-        }
-        const filePath = path.join(VIDEO_DIR, form, filename, season, video);
-        console.log(filePath);
+    //file_source既不是图片也不是视频时
+    if (!isImage && !isVideo) {
+        res.status(401).json({ status: false, msg: "file_source格式非法" });
+        return;
+    }
+    //是图片时
+    if (isImage) {
+        const filePath = path.join(VIDEO_DIR, form, filename, file_source);
         // 安全检查：防止 ../ 路径穿越
         const resolved = path.resolve(filePath);
         //判断拿到的文件的路径是否在VIDEO_DIR里，如果不是，就是越权了
@@ -148,7 +131,45 @@ app.get("/video/:path", (req, res) => {
             res.status(403).json({ status: false, msg: "越权" });
             return;
         }
-        console.log(resolved);
+
+        fs.stat(resolved, (err, stat) => {
+            if (err || !stat.isFile()) {
+                res.status(404).json({ status: false, msg: '图片不存在' });
+                return;
+            }
+            const ext = path.extname(resolved).toLowerCase(); //取路径中文件的扩展名，转小写
+            const contentType = MIME_TYPES[ext] || "application/octet-stream"; //未知类型设置为万能下载类型
+
+            res.status(200)
+                .setHeader("Content-Length", stat.size)
+                .setHeader("Content-Type", contentType)
+                .setHeader("Cache-Control", 'public, max-age=86400')
+            // fs.createReadStream(resolved).pipe(res);
+            // return;
+            const stream = fs.createReadStream(resolved);
+            stream.on('error', (e) => {                 // ← 保留，防异步失败/崩溃
+                if (!res.headersSent) {
+                    res.status(500).json({ status: false, msg: '读取失败' });
+                } else {
+                    res.destroy(e);
+                }
+            });
+            stream.pipe(res);
+            return;
+        });
+    }
+    if (isVideo) {
+        setFileCorsHeaders(res);   //解决跨域问题
+
+        const filePath = path.join(VIDEO_DIR, form, filename, file_source);
+        // 安全检查：防止 ../ 路径穿越
+        const resolved = path.resolve(filePath);
+        //判断拿到的文件的路径是否在VIDEO_DIR里，如果不是，就是越权了
+        if (!resolved.startsWith(path.resolve(VIDEO_DIR) + path.sep)) {
+            res.status(403).json({ status: false, msg: "越权" });
+            return;
+        }
+
         //通过路径获取该文件的信息
         fs.stat(resolved, (err, stat) => {
             //判断该文件是否存在，如果不存在，返回404，过滤长得像文件的文件夹
@@ -160,6 +181,7 @@ app.get("/video/:path", (req, res) => {
             const contentType = MIME_TYPES[ext] || "application/octet-stream"; //未知类型设置为万能下载类型
             const fileSize = stat.size;
             const range = req.headers.range;
+            console.log(range)
 
             //如果请求头里没有range，就直接返回整个文件
             if (!range) {
@@ -248,56 +270,7 @@ app.get("/video/:path", (req, res) => {
         });
     }
 
-
-    ///////////////////////////////////////////////////////第三个分支
-    //返回图片
-    if (notEmpty(img)) {
-        // 文件类型检查：只允许访问指定的文件类型
-        if (!/^[\w.-]+\.(jpg|png|jpeg|webp|gif|bmp|svg)$/.test(img)) {
-            res.status(401).json({ status: false, msg: "文件类类型不符合要求" });
-            return;
-        }
-        const filePath = path.join(VIDEO_DIR, form, filename, season, img);
-        console.log(filePath);
-        // 安全检查：防止 ../ 路径穿越
-        const resolved = path.resolve(filePath);
-        //判断拿到的文件的路径是否在VIDEO_DIR里，如果不是，就是越权了
-        if (!resolved.startsWith(path.resolve(VIDEO_DIR) + path.sep)) {
-            res.status(403).json({ status: false, msg: "越权" });
-            return;
-        }
-        console.log(resolved);
-
-        fs.stat(resolved, (err, stat) => {
-            if (err || !stat.isFile()) {
-                res.status(404).json({ status: false, msg: '图片不存在' });
-                return;
-            }
-            const ext = path.extname(resolved).toLowerCase(); //取路径中文件的扩展名，转小写
-            const contentType = MIME_TYPES[ext] || "application/octet-stream"; //未知类型设置为万能下载类型
-
-            res.status(200)
-                .setHeader("Content-Length", stat.size)
-                .setHeader("Content-Type", contentType)
-                .setHeader("Cache-Control", 'public, max-age=86400')
-            // fs.createReadStream(resolved).pipe(res);
-            // return;
-            const stream = fs.createReadStream(resolved);
-            stream.on('error', (e) => {                 // ← 保留，防异步失败/崩溃
-                if (!res.headersSent) {
-                    res.status(500).json({ status: false, msg: '读取失败' });
-                } else {
-                    res.destroy(e);
-                }
-            });
-            stream.pipe(res);
-            return;
-        });
-    }
 })
-
-
 app.listen(3001, "0.0.0.0", () => {
     console.log("video服务已启动: http://127.0.0.1:3001");
 });
-
